@@ -130,10 +130,17 @@ class PoolService(Service):
 
         await self.middleware.call_hook('pool.pre_export', pool=pool['name'], options=options, job=job)
 
+        # Whether the pool's data is really gone by the end of this job. `options['destroy']` alone
+        # does not answer that: an OFFLINE pool is not imported, so it is neither destroyed nor
+        # wiped and its contents survive on the disks. Consumers that discard configuration on the
+        # strength of the data being unrecoverable must key off this, not off the requested option.
+        destroyed = False
+
         if pool['status'] == 'OFFLINE':
             # Pool exists only in database, it's not imported
             pass
         elif options['destroy']:
+            destroyed = True
             job.set_progress(60, 'Destroying pool')
             await self.middleware.call('zfs.pool.delete', pool['name'])
 
@@ -183,6 +190,8 @@ class PoolService(Service):
         # scrub needs to be regenerated in crontab
         await (await self.call2(self.s.service.control, 'RESTART', 'cron')).wait(raise_error=True)
 
-        await self.middleware.call_hook('pool.post_export', pool=pool['name'], options=options)
+        await self.middleware.call_hook(
+            'pool.post_export', pool=pool['name'], options=options, destroyed=destroyed
+        )
         self.middleware.send_event('pool.query', 'REMOVED', id=oid)
         await self.middleware.call('zpool.send_removed_event', oid)

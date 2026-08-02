@@ -128,6 +128,19 @@ class FSAttachmentDelegate[E](ServiceChangeMixin):
         if attachments:
             await self.start(attachments)
 
+    async def start_on_import(self, path: str) -> None:
+        """
+        Bring this delegate's attachments back up after the pool mounted at `path` was re-imported.
+
+        :param path: mountpoint of the re-imported pool (e.g. "/mnt/tank")
+
+        The default implementation starts the share/service style attachments that the generic
+        `query`/`start` contract describes. Stateful workloads (VMs, containers) override this to
+        honor their autostart configuration rather than booting everything that lives on the pool.
+        """
+        if attachments := await self.query(path, False):
+            await self.start(attachments)
+
     async def disable(self, attachments: list[E]) -> None:
         """
         Disable said items, this is used when we export pool but do not want to delete

@@ -12,6 +12,7 @@ from middlewared.api.current import (
     ContainerDeleteOptions,
     ContainerDeleteResult,
     ContainerEntry,
+    ContainerFilesystemDevice,
     ContainerMigrateArgs,
     ContainerMigrateResult,
     ContainerPoolChoicesArgs,
@@ -25,6 +26,7 @@ from middlewared.api.current import (
     ContainerUpdateArgs,
     ContainerUpdateResult,
     QueryOptions,
+    ZFSResourceQuery,
 )
 from middlewared.service import GenericCRUDService, job, private
 from middlewared.utils.types import AuditCallback
@@ -44,6 +46,7 @@ from .lifecycle import stop as stop_container
 from .migrate import maybe_migrate_legacy, relocate_container_origin, restore_legacy_parent_mountpoints
 from .migrate import migrate as migrate_containers
 from .nsenter import nsenter
+from .utils import container_dataset
 
 if TYPE_CHECKING:
     from truenas_pylibvirt.libvirtd.connection import DomainEvent
@@ -200,6 +203,124 @@ async def __event_system_shutdown(middleware: Middleware, event_type: str, args:
     middleware.create_task(middleware.call2(middleware.services.container.handle_shutdown))
 
 
+async def containers_on_pool(middleware: Middleware, pool: str) -> list[ContainerEntry]:
+    """Every container whose root dataset lives on `pool`, regardless of its runtime state."""
+    prefix = container_dataset(pool)
+    containers = await middleware.call2(middleware.services.container.query)
+    assert isinstance(containers, list)
+    return [c for c in containers if c.dataset == prefix or c.dataset.startswith(f'{prefix}/')]
+
+
+async def pool_post_export(
+    middleware: Middleware,
+    pool: str | None = None,
+    options: dict[str, Any] | None = None,
+    destroyed: bool = False,
+    **kwargs: Any,
+) -> None:
+    """Remove the records of containers whose storage was destroyed along with their pool.
+
+    This is the one case where dropping a container's configuration loses nothing that still
+    exists, which is why it lives here rather than in the attachment delegate: `delete()` cannot
+    see whether the data survived, and a cascaded export of a pool that was merely exported leaves
+    the rootfs datasets intact and would orphan them.
+
+    `destroyed` rather than `options['destroy']` is what makes this safe: asking to destroy an
+    OFFLINE pool leaves it untouched on its disks, so the requested option on its own would have
+    us discard the records of containers whose storage is still perfectly intact.
+
+    Unlike the delegate, this deliberately does not filter on runtime state -- a partial cleanup
+    that keeps the records of stopped containers and drops those of running ones is worse than
+    either extreme.
+    """
+    if not pool or not options or not (options['cascade'] and destroyed):
+        return
+
+    removed = False
+    for container in await containers_on_pool(middleware, pool):
+        try:
+            await middleware.call2(middleware.services.container.delete_container_from_libvirt, container)
+            await middleware.call2(middleware.services.container.delete_container_from_db, container)
+        except Exception:
+            middleware.logger.error(
+                '%s: failed to remove container records after its pool was destroyed',
+                container.name, exc_info=True,
+            )
+        else:
+            removed = True
+
+    if removed:
+        await middleware.call('etc.generate', 'libvirt_guests')
+
+
+async def pool_post_import(middleware: Middleware, pool: dict[str, Any] | None = None, **kwargs: Any) -> None:
+    """Re-point containers at their storage after their pool was imported under a new name.
+
+    A container's dataset is always `<pool>/.truenas_containers/containers/<name>`, so the location
+    under the newly imported pool is derived rather than guessed. The remap is only committed when
+    the old pool is genuinely gone, the derived dataset actually exists, and no other container
+    already claims it -- otherwise the record is left alone for the user to sort out, which is the
+    safer failure.
+    """
+    if pool is None:
+        # Fired with no pool on boot
+        return
+
+    containers = await middleware.call2(middleware.services.container.query)
+    assert isinstance(containers, list)
+    known_pools = {p['name'] for p in await middleware.call('pool.query')}
+    claimed = {c.dataset for c in containers}
+
+    for container in containers:
+        old_pool = container.dataset.split('/')[0]
+        if old_pool == pool['name'] or old_pool in known_pools:
+            continue
+
+        dataset = f'{container_dataset(pool["name"])}/containers/{container.name}'
+        if dataset in claimed:
+            middleware.logger.warning(
+                '%s: not re-pointing container at %r after pool rename, another container already uses it',
+                container.name, dataset,
+            )
+            continue
+
+        if not await middleware.call2(
+            middleware.services.zfs.resource.query_impl,
+            ZFSResourceQuery(paths=[dataset], properties=None),
+        ):
+            continue
+
+        # Written through the datastore rather than `container.update` / `container.device.update`
+        # so that validation of an unrelated part of the container (a missing bridge device, say)
+        # cannot fail the pool import. One container failing must not abort the import or stop the
+        # rest from being re-pointed, so each is applied behind its own boundary.
+        try:
+            await middleware.call('datastore.update', 'container.container', container.id, {'dataset': dataset})
+            for device in container.devices:
+                if not isinstance(device.attributes, ContainerFilesystemDevice):
+                    continue
+
+                source = device.attributes.source
+                if source == f'/mnt/{old_pool}' or source.startswith(f'/mnt/{old_pool}/'):
+                    attributes = device.attributes.model_dump()
+                    attributes['source'] = f'/mnt/{pool["name"]}' + source[len(f'/mnt/{old_pool}'):]
+                    await middleware.call(
+                        'datastore.update', 'container.device', device.id, {'attributes': attributes}
+                    )
+        except Exception:
+            middleware.logger.error(
+                '%s: failed to re-point container at %r after pool rename', container.name, dataset,
+                exc_info=True,
+            )
+            continue
+
+        claimed.add(dataset)
+        middleware.logger.info(
+            '%s: re-pointed container at %r after its pool was renamed from %r',
+            container.name, dataset, old_pool,
+        )
+
+
 def domain_event_callback(middleware: Middleware, event: DomainEvent) -> None:
     containers = middleware.call_sync2(
         middleware.services.container.query, [['uuid', '=', event.uuid]], QueryOptions(force_sql_filters=True)
@@ -212,6 +333,8 @@ def domain_event_callback(middleware: Middleware, event: DomainEvent) -> None:
 async def setup(middleware: Middleware) -> None:
     middleware.event_subscribe('system.ready', __event_system_ready)
     middleware.event_subscribe('system.shutdown', __event_system_shutdown)
+    middleware.register_hook('pool.post_export', pool_post_export, sync=True)
+    middleware.register_hook('pool.post_import', pool_post_import, sync=True)
     middleware.libvirt_domains_manager.containers.connection.register_domain_event_callback(
         functools.partial(domain_event_callback, middleware)
     )

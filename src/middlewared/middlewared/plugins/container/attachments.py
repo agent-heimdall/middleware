@@ -99,6 +99,17 @@ class ContainerFSAttachmentDelegate(FSAttachmentDelegate[dict[str, Any]]):
     def storage_paths(self, container: ContainerEntry) -> list[str]:
         # The paths whose datasets the container needs to run: its root dataset and every FILESYSTEM
         # device source.
+        #
+        # The root entry is deliberately derived from the dataset *name*, not from where the
+        # dataset is actually mounted (`container_instance_dataset_mountpoint`, which yields
+        # `/mnt/.truenas_containers/<pool>/containers/<name>`). Both consumers of this list need
+        # the name-derived form:
+        # - `filesystem.is_child` is asked whether the container lives under `/mnt/<pool>`, which
+        #   the real mountpoint is not a child of.
+        # - `pool.dataset.path_in_locked_datasets` strips `/mnt/` and re-parses the remainder as a
+        #   dataset name.
+        # Switching this to the real mountpoint would silently stop matching containers on pool
+        # export and pool lock.
         paths = [os.path.join('/mnt', container.dataset)]
         for device in container.devices:
             if isinstance(device.attributes, ContainerFilesystemDevice):
@@ -123,13 +134,17 @@ class ContainerFSAttachmentDelegate(FSAttachmentDelegate[dict[str, Any]]):
         return False
 
     async def delete(self, attachments: list[dict[str, Any]]) -> None:
-        for attachment in attachments:
-            try:
-                container = await self.middleware.call2(self.s.container.get_instance, attachment['id'])
-                await self.middleware.call2(self.s.container.delete_container_from_libvirt, container)
-                await self.middleware.call2(self.s.container.delete_container_from_db, container)
-            except Exception:
-                self.logger.warning('Unable to delete %r container', attachment['id'])
+        # Stop only -- never remove the container's records here. The database row is the only copy
+        # of a container's definition (init, environment, devices, capabilities), and its rootfs
+        # dataset outlives this delegate: a pool may simply have been exported, in which case the
+        # storage is still there and is orphaned the moment the row goes. Freeing the container's
+        # idmap slice makes that unrecoverable, because a later container can claim the UID range
+        # the surviving rootfs is still owned by.
+        #
+        # Records are removed only where nothing recoverable is left -- when the pool was both
+        # cascaded and destroyed -- which the `pool.post_export` hook in this plugin handles,
+        # because that is where the `destroy` option is visible.
+        await self.stop(attachments)
 
     async def toggle(self, attachments: list[dict[str, Any]], enabled: bool) -> None:
         await getattr(self, 'start' if enabled else 'stop')(attachments)
@@ -160,9 +175,17 @@ class ContainerFSAttachmentDelegate(FSAttachmentDelegate[dict[str, Any]]):
             mountpoint for dataset, mountpoint in datasets
             if dataset['type'] == 'FILESYSTEM' and mountpoint
         ]
-        if not paths:
-            return
+        if paths:
+            await self.start_autostart_on_paths(paths)
 
+    async def start_on_import(self, path: str) -> None:
+        # Same reasoning as `start_on_unlock`: the generic path would start every stopped container
+        # on the pool, ignoring autostart entirely.
+        await self.start_autostart_on_paths([path])
+
+    async def start_autostart_on_paths(self, paths: list[str]) -> None:
+        # (Re)start the autostart containers whose storage lives on `paths`, now that those paths
+        # have become available again.
         containers = await self.middleware.call2(
             self.s.container.query, [('autostart', '=', True)], QueryOptions(force_sql_filters=True)
         )
@@ -181,7 +204,8 @@ class ContainerFSAttachmentDelegate(FSAttachmentDelegate[dict[str, Any]]):
                 state = (await self.middleware.call2(self.s.container.get_instance, container.id)).status.state
             except Exception:
                 self.logger.warning(
-                    'Unable to query %r container after unlock', container.id, exc_info=True
+                    'Unable to query %r container after its storage became available',
+                    container.id, exc_info=True
                 )
                 continue
 
@@ -203,7 +227,10 @@ class ContainerFSAttachmentDelegate(FSAttachmentDelegate[dict[str, Any]]):
             try:
                 await self.middleware.call2(self.s.container.start, container.id)
             except Exception:
-                self.logger.error('Failed to start %r container after unlock', container.id, exc_info=True)
+                self.logger.error(
+                    'Failed to start %r container after its storage became available',
+                    container.id, exc_info=True
+                )
 
 
 async def setup(middleware: Middleware) -> None:
