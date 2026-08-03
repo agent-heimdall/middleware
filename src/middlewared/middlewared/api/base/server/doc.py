@@ -128,10 +128,13 @@ class APIDumper:
     async def _dump_methods(self) -> list[APIDumpMethod]:
         result = []
         for method in self.api.methods:
-            if method.serviceobj._config.private:
-                continue
-
-            if getattr(method.methodobj, "_private", False):
+            # `Method.private` unions the service config, the `private=` kwarg
+            # on the method, and the per-version override that `Middleware.
+            # _create_api` sets for every version at or past a method's
+            # `removed_in`. Checking the first two directly, as this did, made
+            # that override invisible here — so a method stayed in the dump for
+            # versions it had already been removed from.
+            if method.private:
                 continue
 
             if not hasattr(method.methodobj, "new_style_accepts"):
