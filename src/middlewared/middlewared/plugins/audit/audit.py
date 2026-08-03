@@ -26,6 +26,7 @@ from middlewared.service_exception import CallError, ValidationError, Validation
 import middlewared.sqlalchemy as sa
 from middlewared.utils.filter_list import filter_list
 from middlewared.utils.functools_ import cache
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .schema.middleware import AUDIT_EVENT_MIDDLEWARE_JSON_SCHEMAS, AUDIT_EVENT_MIDDLEWARE_PARAM_SET
 from .schema.smb import AUDIT_EVENT_SMB_JSON_SCHEMAS, AUDIT_EVENT_SMB_PARAM_SET
@@ -399,11 +400,15 @@ class AuditService(ConfigService):
             return
 
         args = UpdateImplArgs(name=ds['name'], zprops=zprops, uprops=uprops)
-        await self.middleware.call('pool.dataset.update_impl', args)
+        await self.middleware.call('pool.dataset.update_impl', args, InternalAccess.ALLOW)
         if await self.middleware.call('failover.status') == 'MASTER':
             try:
+                # `InternalAccess` is a str enum, so it crosses to the peer node as the plain
+                # string "ALLOW" and is coerced back on arrival.
                 await self.middleware.call(
-                    'failover.call_remote', 'pool.dataset.update_impl', [args]
+                    'failover.call_remote',
+                    'pool.dataset.update_impl',
+                    [args, InternalAccess.ALLOW],
                 )
             except Exception as e:
                 if isinstance(e, CallError) and hasattr(e, "errno") and e.errno == CallError.ENOMETHOD:
@@ -490,7 +495,8 @@ class AuditService(ConfigService):
             try:
                 await self.middleware.call(
                     'pool.dataset.update_impl',
-                    UpdateImplArgs(name=ds_name, zprops=zprops)
+                    UpdateImplArgs(name=ds_name, zprops=zprops),
+                    InternalAccess.ALLOW,
                 )
             except Exception:
                 self.logger.error(

@@ -19,6 +19,7 @@ from middlewared.service import Service, private
 from middlewared.service.decorators import pass_thread_local_storage
 from middlewared.service_exception import ValidationError
 from middlewared.utils.filter_list import filter_list
+from middlewared.utils.zfs.guard import InternalAccess, deny_protected_path
 
 from .destroy_impl import destroy_impl
 from .exceptions import (
@@ -41,7 +42,7 @@ from .rename_promote_clone_impl import (
     promote_impl,
     rename_impl,
 )
-from .utils import group_paths_by_parents, has_internal_path
+from .utils import group_paths_by_parents
 from .zvol_utils import get_zvol_attachments_impl, unlocked_zvols_fast_impl
 
 if typing.TYPE_CHECKING:
@@ -93,14 +94,23 @@ class ZFSResourceService(Service):
 
     @private
     @pass_thread_local_storage
-    def promote(self, tls: typing.Any, current_name: str) -> None:
+    def promote(
+        self,
+        tls: typing.Any,
+        current_name: str,
+        access: InternalAccess = InternalAccess.DENY,
+    ) -> None:
         """
         Promote a ZFS clone to be independent of its origin snapshot.
 
         Args:
             current_name: The name of the zfs resource to be promoted.
+            access: `InternalAccess.ALLOW` when the caller is the subsystem that owns the path, which
+                lifts the refusal to touch a dataset middleware manages on the user's behalf.
         """
         schema = "zfs.resource.promote"
+        deny_protected_path(schema, current_name, access)
+
         try:
             promote_impl(tls, current_name)
         except ZFSPathInvalidException:
@@ -112,6 +122,11 @@ class ZFSResourceService(Service):
         except ZFSPathNotFoundException as e:
             raise ValidationError(schema, e.message, errno.ENOENT)
 
+    # `mount` and `unmount` are deliberately left unguarded against the datasets middleware manages
+    # on the user's behalf. Unlike every other mutator here they create, destroy and rename nothing:
+    # they only toggle whether a dataset is currently visible in the filesystem, and its contents
+    # remain unreachable through this API either way. Guarding them would also break the docker
+    # plugin, which mounts and unmounts `<pool>/ix-apps` as part of normal operation.
     @private
     @pass_thread_local_storage
     def mount(
@@ -212,7 +227,12 @@ class ZFSResourceService(Service):
     @private
     @pass_thread_local_storage
     def unload_key(
-        self, tls: typing.Any, filesystem: str, recursive: bool = False, force_unmount: bool = False
+        self,
+        tls: typing.Any,
+        filesystem: str,
+        recursive: bool = False,
+        force_unmount: bool = False,
+        access: InternalAccess = InternalAccess.DENY,
     ) -> None:
         """
         Unload the encryption key from ZFS.
@@ -225,8 +245,12 @@ class ZFSResourceService(Service):
             recursive: Recursively unload encryption keys for any child resources of the
                 parent.
             force_unmount: Forcefully unmount the resource before unloading the encryption key.
+            access: `InternalAccess.ALLOW` when the caller is the subsystem that owns the path, which
+                lifts the refusal to touch a dataset middleware manages on the user's behalf.
         """
         schema = "zfs.resource.unload_key"
+        deny_protected_path(schema, filesystem, access)
+
         try:
             unload_key_impl(tls, filesystem, recursive, force_unmount)
         except ZFSPathNotProvidedException:
@@ -244,6 +268,7 @@ class ZFSResourceService(Service):
         recursive: bool = False,
         no_unmount: bool = False,
         force_unmount: bool = True,
+        access: InternalAccess = InternalAccess.DENY,
     ) -> None:
         """
         Rename a ZFS resource.
@@ -268,8 +293,18 @@ class ZFSResourceService(Service):
                 property is set to legacy or none, the file system is not unmounted even
                 if this option is False (default).
             force_unmount: Force unmount any file systems that need to be unmounted in the process.
+            access: `InternalAccess.ALLOW` when the caller is the subsystem that owns the paths, which
+                lifts the refusal to touch a dataset middleware manages on the user's behalf.
         """
         schema = "zfs.resource.rename"
+
+        # Both ends are guarded, and before the snapshot rejection below. Guarding the destination
+        # is what stops a rename from *creating* a dataset at a protected path, and doing it first
+        # means a protected snapshot name is refused outright rather than answered with a hint
+        # about which method to use instead.
+        deny_protected_path(schema, current_name, access)
+        deny_protected_path(schema, new_name, access)
+
         if "@" in current_name:
             raise ValidationError(
                 schema,
@@ -350,14 +385,32 @@ class ZFSResourceService(Service):
 
     @private
     @pass_thread_local_storage
-    def query_impl(self, tls: typing.Any, data: ZFSResourceQuery) -> list[dict[str, typing.Any]]:
+    def query_impl(
+        self,
+        tls: typing.Any,
+        data: ZFSResourceQuery,
+        exclude_internal_paths: bool = True,
+    ) -> list[dict[str, typing.Any]]:
+        """
+        Internal implementation for querying ZFS resources.
+
+        Args:
+            data: The query arguments.
+            exclude_internal_paths: Set to False to include the datasets middleware manages on the
+                user's behalf. Naming such a path explicitly in `data.paths` already opts out.
+        """
         self.validate_query_args(data)
 
         tier_enabled = False
         if data.get_tier:
             tier_enabled = self.call_sync2(self.s.zfs.tier.config).enabled
 
-        results = query_impl(tls.lzh, data.model_dump(), tier_enabled=tier_enabled)
+        results = query_impl(
+            tls.lzh,
+            data.model_dump(),
+            tier_enabled=tier_enabled,
+            exclude_internal_paths=exclude_internal_paths,
+        )
         if data.nest_results:
             return self.nest_paths(results)
         else:
@@ -371,8 +424,8 @@ class ZFSResourceService(Service):
         path: str,
         recursive: bool = False,
         all_snapshots: bool = False,
-        bypass: bool = False,
         defer: bool = False,
+        access: InternalAccess = InternalAccess.DENY,
     ) -> tuple[str | None, int | None]:
         """
         Internal implementation for destroying a ZFS resource.
@@ -383,12 +436,10 @@ class ZFSResourceService(Service):
                 release any holds and destroy any clones or snapshots.
             all_snapshots: If true, will delete all snapshots ONLY for the
                 given zfs resource. Will not delete the resource itself.
-            bypass: If true, will bypass the safety checks that prevent
-                deleting zfs resources that are "protected".
-                NOTE: This is only ever set by internal callers and is
-                not exposed to the public API.
             defer: Rather than returning error if the given snapshot is ineligible for immediate destruction,
                 mark it for deferred, automatic destruction once it becomes eligible.
+            access: `InternalAccess.ALLOW` when the caller is the subsystem that owns the path, which
+                lifts the refusal to touch a dataset middleware manages on the user's behalf.
         """
         schema = "zfs.resource.destroy"
         if os.path.isabs(path):
@@ -401,12 +452,10 @@ class ZFSResourceService(Service):
             raise ValidationError(
                 schema, "Path must not end with a forward-slash.", errno.EINVAL
             )
-        elif not bypass and has_internal_path(path):
-            # NOTE: `bypass` is a value only exposed to
-            # internal callers and not to our public API.
-            raise ValidationError(
-                schema, f"{path!r} is a protected path.", errno.EACCES
-            )
+
+        # Deliberately not stripping a snapshot suffix here: `tank/.system@snap` has to fall through
+        # to the message below that points the caller at `zfs.resource.snapshot.destroy`.
+        deny_protected_path(schema, path, access)
 
         if "@" in path:
             raise ValidationError(
@@ -442,7 +491,7 @@ class ZFSResourceService(Service):
                         schema, f"{path!r} has snapshots. {extra}", errno.ENOTEMPTY
                     )
 
-        return destroy_impl(tls, path, recursive, all_snapshots, bypass, defer)
+        return destroy_impl(tls, path, recursive, all_snapshots, defer)
 
     @api_method(
         ZFSResourceDestroyArgs,

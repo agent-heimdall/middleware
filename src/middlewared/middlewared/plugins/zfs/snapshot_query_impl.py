@@ -3,9 +3,10 @@ from typing import Any
 
 from truenas_pylibzfs import ZFSError, ZFSException, ZFSType
 
+from middlewared.utils.zfs.managed_datasets import hidden_from_zfs_listing
+
 from .exceptions import ZFSPathNotFoundException
 from .property_management import DeterminedProperties, build_set_of_zfs_snapshot_props
-from .utils import has_internal_path
 
 __all__ = ("query_snapshots_impl",)
 
@@ -61,7 +62,7 @@ def __snapshot_callback(snap_hdl: Any, state: SnapshotQueryState) -> bool:
     snap_name = snap_hdl.name
 
     # Check if internal path should be excluded
-    if state.eip and has_internal_path(snap_name):
+    if state.eip and hidden_from_zfs_listing(snap_name):
         return True
 
     # Apply txg filtering
@@ -108,7 +109,7 @@ def __dataset_iter_callback(ds_hdl: Any, state: SnapshotQueryState) -> bool:
     ds_name = ds_hdl.name
 
     # Check if internal path should be excluded
-    if state.eip and has_internal_path(ds_name):
+    if state.eip and hidden_from_zfs_listing(ds_name):
         return True
 
     # Set parent type for snapshot property resolution
@@ -127,7 +128,7 @@ def __dataset_iter_callback(ds_hdl: Any, state: SnapshotQueryState) -> bool:
 def __should_exclude_internal_paths(data: dict[str, Any]) -> bool:
     """Determine if internal paths should be excluded from results."""
     for path in data.get("paths", []):
-        if has_internal_path(path):
+        if hidden_from_zfs_listing(path):
             # Someone is explicitly querying an internal path
             return False
     # Exclude internal paths by default

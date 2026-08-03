@@ -9,6 +9,7 @@ from middlewared.api.current import ZFSResourceQuery
 from middlewared.plugins.pool_.utils import CreateImplArgs, UpdateImplArgs
 from middlewared.service import CallError, ServiceContext
 from middlewared.utils.interface import wait_for_default_interface_link_state_up
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .fs_manage import mount_docker_ds
 from .state_utils import (
@@ -100,7 +101,8 @@ def create_update_docker_datasets(context: ServiceContext, docker_ds: str) -> No
                 # if any of the zfs properties don't match what we expect we'll update all properties
                 context.middleware.call_sync(
                     'pool.dataset.update_impl',
-                    UpdateImplArgs(name=dataset_name, zprops=update_props)
+                    UpdateImplArgs(name=dataset_name, zprops=update_props),
+                    InternalAccess.ALLOW,
                 )
         else:
             move_conflicting_dir(dataset_name)

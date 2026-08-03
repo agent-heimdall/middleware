@@ -20,7 +20,6 @@ from middlewared.api.current import (
     ZFSResourceQuery,
 )
 from middlewared.plugins.container.utils import CONTAINER_DS_NAME
-from middlewared.plugins.zfs.utils import has_internal_path
 from middlewared.plugins.zfs_.validation_utils import validate_dataset_name
 from middlewared.service import (
     CallError,
@@ -33,9 +32,9 @@ from middlewared.service import (
 )
 from middlewared.service.decorators import pass_thread_local_storage
 import middlewared.sqlalchemy as sa
-from middlewared.utils.boot.pool import BOOT_POOL_NAME_VALID
 from middlewared.utils.filesystem import attrs as fs_attrs
-from middlewared.utils.filter_list import filter_list
+from middlewared.utils.zfs.guard import InternalAccess, deny_protected_path
+from middlewared.utils.zfs.managed_datasets import reserved_from_user_creation
 
 from .dataset_query_utils import generic_query
 from .utils import (
@@ -89,21 +88,6 @@ class PoolDatasetService(CRUDService):
                 }
             }
         )
-
-    @private
-    async def internal_datasets_filters(self):
-        # We get filters here which ensure that we don't match an internal dataset
-        return [
-            ['pool', 'nin', BOOT_POOL_NAME_VALID],
-            ['id', 'rnin', '/.system'],
-            ['id', 'rnin', '/ix-applications/'],
-            ['id', 'rnin', '/ix-apps'],
-        ]
-
-    @private
-    async def is_internal_dataset(self, dataset):
-        pool = dataset.split('/')[0]
-        return not bool(filter_list([{'id': dataset, 'pool': pool}], await self.internal_datasets_filters()))
 
     @filterable_api_method(
         item=PoolDatasetEntry,
@@ -173,7 +157,9 @@ class PoolDatasetService(CRUDService):
                 {'extra': {'retrieve_children': False}}
             )
 
-        if await self.is_internal_dataset(data['name']):
+        # Live for CREATE only. UPDATE reaches its own refusal before it ever gets here, so this
+        # check is unreachable in that mode -- it stays because CREATE has nothing else.
+        if reserved_from_user_creation(data['name']):
             verrors.add(
                 f'{schema}.name',
                 f'{data["name"]!r} is using system internal managed dataset. Please specify a different parent.'
@@ -764,7 +750,16 @@ class PoolDatasetService(CRUDService):
 
     @private
     @pass_thread_local_storage
-    def update_impl(self, tls, data: UpdateImplArgs):
+    def update_impl(self, tls, data: UpdateImplArgs, access: InternalAccess = InternalAccess.DENY):
+        """Set, or inherit, properties on `data['name']`.
+
+        `access` is positional-or-keyword because every owner here reaches this method through the
+        legacy `middleware.call`, which forwards its arguments positionally and has no way to pass a
+        keyword. It is `InternalAccess.ALLOW` when the caller is the subsystem that owns the
+        dataset, which lifts the refusal to touch a dataset middleware manages on the user's behalf.
+        """
+        deny_protected_path('pool.dataset.update', data['name'], access)
+
         # Convert TypedDict to dataclass to handle defaults for missing fields
         args = UpdateImplArgsDataclass(
             name=data['name'],
@@ -797,6 +792,10 @@ class PoolDatasetService(CRUDService):
                 }]
             }
         """
+        # Ahead of the query below, which hides the datasets middleware manages and would otherwise
+        # answer for them with a misleading "does not exist".
+        deny_protected_path('pool.dataset.update', id_)
+
         verrors = ValidationErrors()
 
         dataset = await self.middleware.call(
@@ -912,8 +911,7 @@ class PoolDatasetService(CRUDService):
                 "params": ["tank/myuser"]
             }
         """
-        if has_internal_path(id_):
-            raise ValidationError('pool.dataset.delete', f'{id_} is an invalid location')
+        deny_protected_path('pool.dataset.delete', id_)
 
         if not options['recursive']:
             ds = await self.call2(

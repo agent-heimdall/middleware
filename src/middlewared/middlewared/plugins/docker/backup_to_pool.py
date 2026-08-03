@@ -5,6 +5,7 @@ import typing
 from middlewared.api.current import ZFSResourceQuery, ZFSResourceSnapshotCreateQuery
 from middlewared.plugins.zfs.utils import get_encryption_info
 from middlewared.service import CallError, ServiceContext, ValidationErrors
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .utils import applications_ds_name
 
@@ -47,12 +48,15 @@ async def backup_to_pool(context: ServiceContext, job: Job, target_pool: str) ->
         snap_name = await context.middleware.call(
             'replication.new_snapshot_name', schema
         )
-        await context.call2(context.s.zfs.resource.snapshot.create_impl, ZFSResourceSnapshotCreateQuery(
-            dataset=applications_ds_name(docker_config.pool),
-            name=snap_name,
-            recursive=True,
-            bypass=True,
-        ))
+        await context.call2(
+            context.s.zfs.resource.snapshot.create_impl,
+            ZFSResourceSnapshotCreateQuery(
+                dataset=applications_ds_name(docker_config.pool),
+                name=snap_name,
+                recursive=True,
+            ),
+            access=InternalAccess.ALLOW,
+        )
     finally:
         # We do this in try/finally block to ensure that docker service is started back
         await (await context.call2(context.s.service.control, 'START', 'docker')).wait(raise_error=True)

@@ -23,6 +23,7 @@ from middlewared.api.current import (
 from middlewared.plugins.truenas_connect.utils import TNC_CERT_PREFIX
 from middlewared.plugins.zfs_.utils import paths_to_datasets_impl
 from middlewared.service import CallError, ServiceContext
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .compose_utils import compose_action
 from .ix_apps.path import get_app_parent_volume_ds, get_installed_app_path
@@ -156,7 +157,10 @@ def remove_failed_resources(context: ServiceContext, app_name: str, version: str
 
     if apps_volume_ds and remove_ds:
         try:
-            context.call_sync2(context.s.zfs.resource.destroy_impl, apps_volume_ds, recursive=True, bypass=True)
+            context.call_sync2(
+                context.s.zfs.resource.destroy_impl, apps_volume_ds,
+                recursive=True, access=InternalAccess.ALLOW,
+            )
         except Exception:
             context.logger.error('Failed to remove %r app volume dataset', apps_volume_ds, exc_info=True)
 
@@ -196,7 +200,10 @@ def delete_internal_resources(
     shutil.rmtree(get_installed_app_path(app_name))
 
     if options.remove_ix_volumes and (apps_volume_ds := get_app_volume_ds(context, app_name)):
-        context.call_sync2(context.s.zfs.resource.destroy_impl, apps_volume_ds, recursive=True, bypass=True)
+        context.call_sync2(
+            context.s.zfs.resource.destroy_impl, apps_volume_ds,
+            recursive=True, access=InternalAccess.ALLOW,
+        )
 
     if send_event:
         context.middleware.send_event('app.query', 'REMOVED', id=app_name)

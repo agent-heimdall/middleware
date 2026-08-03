@@ -8,6 +8,7 @@ from middlewared.api.current import DockerEntry, ZFSResourceSnapshotCreateQuery,
 from middlewared.plugins.pool_.utils import CreateImplArgs
 from middlewared.service import CallError, ServiceContext
 from middlewared.service_exception import InstanceNotFound
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .backup import delete_backup
 from .backup_to_pool import incrementally_replicate_apps_dataset
@@ -84,27 +85,36 @@ async def replicate_apps_dataset(context: ServiceContext, new_pool: str, old_poo
     snap_name = await context.middleware.call(
         'replication.new_snapshot_name', MIGRATION_NAMING_SCHEMA
     )
-    snap_details = await context.call2(context.s.zfs.resource.snapshot.create_impl, ZFSResourceSnapshotCreateQuery(
-        dataset=applications_ds_name(old_pool),
-        name=snap_name,
-        recursive=True,
-        bypass=True,
-    ))
+    snap_details = await context.call2(
+        context.s.zfs.resource.snapshot.create_impl,
+        ZFSResourceSnapshotCreateQuery(
+            dataset=applications_ds_name(old_pool),
+            name=snap_name,
+            recursive=True,
+        ),
+        access=InternalAccess.ALLOW,
+    )
 
     try:
         await incrementally_replicate_apps_dataset(context, old_pool, new_pool, MIGRATION_NAMING_SCHEMA)
     finally:
-        await context.call2(context.s.zfs.resource.snapshot.destroy_impl, ZFSResourceSnapshotDestroyQuery(
-            path=snap_details['name'],
-            recursive=True,
-            bypass=True,
-        ))
+        await context.call2(
+            context.s.zfs.resource.snapshot.destroy_impl,
+            ZFSResourceSnapshotDestroyQuery(
+                path=snap_details['name'],
+                recursive=True,
+            ),
+            access=InternalAccess.ALLOW,
+        )
         target_snap_name = f'{applications_ds_name(new_pool)}@{snap_details["snapshot_name"]}'
         try:
-            await context.call2(context.s.zfs.resource.snapshot.destroy_impl, ZFSResourceSnapshotDestroyQuery(
-                path=target_snap_name,
-                recursive=True,
-                bypass=True,
-            ))
+            await context.call2(
+                context.s.zfs.resource.snapshot.destroy_impl,
+                ZFSResourceSnapshotDestroyQuery(
+                    path=target_snap_name,
+                    recursive=True,
+                ),
+                access=InternalAccess.ALLOW,
+            )
         except InstanceNotFound:
             pass

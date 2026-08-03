@@ -22,6 +22,7 @@ from middlewared.service import CallError, CRUDService, ValidationErrors, job, p
 import middlewared.sqlalchemy as sa
 from middlewared.utils.boot.pool import BOOT_POOL_NAME_VALID
 from middlewared.utils.size import format_size
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .utils import RE_DRAID_DATA_DISKS, RE_DRAID_SPARE_DISKS, ZPOOL_CACHE_FILE, validate_dedup_license
 
@@ -650,7 +651,8 @@ class PoolService(CRUDService):
             # making it a "local" source.
             await self.middleware.call(
                 'pool.dataset.update_impl',
-                UpdateImplArgs(name=data['name'], iprops={'mountpoint'})
+                UpdateImplArgs(name=data['name'], iprops={'mountpoint'}),
+                InternalAccess.ALLOW,
             )
             await self.call2(self.s.zfs.resource.mount, data['name'])
 

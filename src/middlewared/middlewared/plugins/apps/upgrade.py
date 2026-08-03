@@ -30,6 +30,7 @@ from middlewared.plugins.catalog.utils import IX_APP_NAME
 from middlewared.service import CallError, ServiceContext, ValidationErrors
 from middlewared.service_exception import InstanceNotFound
 from middlewared.utils.yaml import safe_yaml_load
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .compose_utils import compose_action
 from .ix_apps.lifecycle import add_context_to_values, get_current_app_config, update_app_config
@@ -201,20 +202,26 @@ def upgrade_impl(context: ServiceContext, job: Job, app_name: str, options: AppU
         if app_volume_ds := get_app_volume_ds(context, app_name):
             snap_name = f'{app_volume_ds}@{app.version}'
             try:
-                context.call_sync2(context.s.zfs.resource.snapshot.destroy_impl, ZFSResourceSnapshotDestroyQuery(
-                    path=snap_name,
-                    recursive=True,
-                    bypass=True,
-                ))
+                context.call_sync2(
+                    context.s.zfs.resource.snapshot.destroy_impl,
+                    ZFSResourceSnapshotDestroyQuery(
+                        path=snap_name,
+                        recursive=True,
+                    ),
+                    access=InternalAccess.ALLOW,
+                )
             except InstanceNotFound:
                 pass
 
-            context.call_sync2(context.s.zfs.resource.snapshot.create_impl, ZFSResourceSnapshotCreateQuery(
-                dataset=app_volume_ds,
-                name=app.version,
-                recursive=True,
-                bypass=True,
-            ))
+            context.call_sync2(
+                context.s.zfs.resource.snapshot.create_impl,
+                ZFSResourceSnapshotCreateQuery(
+                    dataset=app_volume_ds,
+                    name=app.version,
+                    recursive=True,
+                ),
+                access=InternalAccess.ALLOW,
+            )
 
             job.set_progress(50, 'Created snapshot for upgrade')
 
@@ -286,11 +293,14 @@ def take_snapshot_of_hostpath(
             logger.debug('Snapshot %r already exists for %r app', snap_name, app_info.name)
             continue
 
-        context.call_sync2(context.s.zfs.resource.snapshot.create_impl, ZFSResourceSnapshotCreateQuery(
-            dataset=dataset,
-            name=get_upgrade_snap_name(app_info.name, app_info.version),
-            bypass=True,
-        ))
+        context.call_sync2(
+            context.s.zfs.resource.snapshot.create_impl,
+            ZFSResourceSnapshotCreateQuery(
+                dataset=dataset,
+                name=get_upgrade_snap_name(app_info.name, app_info.version),
+            ),
+            access=InternalAccess.ALLOW,
+        )
         logger.debug('Created snapshot %r for %r app', snap_name, app_info.name)
 
 

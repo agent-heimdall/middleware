@@ -22,6 +22,7 @@ from middlewared.plugins.apps.ix_apps.path import get_collective_config_path, ge
 from middlewared.plugins.apps.ix_apps.utils import dump_yaml
 from middlewared.plugins.zfs_.validation_utils import validate_snapshot_name
 from middlewared.service import CallError, ServiceContext
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .state_management import validate_state
 from .state_utils import backup_apps_state_file_path, backup_ds_path, datasets_to_skip_for_snapshot_on_backup
@@ -154,8 +155,8 @@ def delete_backup(context: ServiceContext, backup_name: str) -> None:
         ZFSResourceSnapshotDestroyQuery(
             path=backup.snapshot_name,
             recursive=True,
-            bypass=True,
         ),
+        access=InternalAccess.ALLOW,
     )
     shutil.rmtree(backup.backup_path, True)
 

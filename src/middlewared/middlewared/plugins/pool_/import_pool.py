@@ -19,6 +19,7 @@ from middlewared.plugins.pool_.utils import UpdateImplArgs
 from middlewared.service import CallError, InstanceNotFound, Service, ValidationError, job, private
 from middlewared.utils.filesystem import attrs as fs_attrs
 from middlewared.utils.zfs import query_imported_fast_impl
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .utils import ZPOOL_CACHE_FILE
 
@@ -58,7 +59,8 @@ class PoolService(Service):
                     # we'll need iterate all children no matter what.
                     await self.middleware.call(
                         'pool.dataset.update_impl',
-                        UpdateImplArgs(name=i['name'], iprops={'mountpoint'})
+                        UpdateImplArgs(name=i['name'], iprops={'mountpoint'}),
+                        InternalAccess.ALLOW,
                     )
                     to_inherit.append(pool_name)
                     break
@@ -79,7 +81,8 @@ class PoolService(Service):
                     # unintentionally share it via SMB, NFS, etc.
                     await self.middleware.call(
                         'pool.dataset.update_impl',
-                        UpdateImplArgs(name=i['name'], zprops={'mountpoint': container_mnt})
+                        UpdateImplArgs(name=i['name'], zprops={'mountpoint': container_mnt}),
+                        InternalAccess.ALLOW,
                     )
 
                 # We do not do anything if the mountpoint is already correct
@@ -99,7 +102,8 @@ class PoolService(Service):
                 try:
                     await self.middleware.call(
                         'pool.dataset.update_impl',
-                        UpdateImplArgs(name=i.name, iprops={'mountpoint'})
+                        UpdateImplArgs(name=i.name, iprops={'mountpoint'}),
+                        InternalAccess.ALLOW,
                     )
                 except Exception:
                     self.logger.exception('Failed inheriting mountpoint property for %r', i.name)
@@ -429,7 +433,11 @@ class PoolService(Service):
         if opts:
             try:
                 self.logger.debug('Calling pool.dateset.update_impl on %r with opts %r', vol_name, opts)
-                self.middleware.call_sync('pool.dataset.update_impl', UpdateImplArgs(name=vol_name, zprops=opts))
+                self.middleware.call_sync(
+                    'pool.dataset.update_impl',
+                    UpdateImplArgs(name=vol_name, zprops=opts),
+                    InternalAccess.ALLOW,
+                )
             except Exception:
                 self.logger.warning('%r: failed to normalize properties of root-level dataset', vol_name, exc_info=True)
             else:

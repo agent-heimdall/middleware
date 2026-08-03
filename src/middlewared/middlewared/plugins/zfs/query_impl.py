@@ -3,11 +3,12 @@ from typing import Any
 
 from truenas_pylibzfs import ZFSError, ZFSException
 
+from middlewared.utils.zfs.managed_datasets import hidden_from_zfs_listing
+
 from .exceptions import ZFSPathNotFoundException
 from .normalization import normalize_asdict_result
 from .property_management import DeterminedProperties, build_set_of_zfs_props
 from .tier import get_dataset_tier_info_cached
-from .utils import has_internal_path
 
 __all__ = ("query_impl",)
 
@@ -30,7 +31,7 @@ class CallbackState:
 
 
 def __query_impl_callback(hdl: Any, state: CallbackState) -> bool:
-    if state.eip and has_internal_path(hdl.name):
+    if state.eip and hidden_from_zfs_listing(hdl.name):
         # returning False here will halt the iteration
         # entirely which is not what we want to do
         return True
@@ -95,22 +96,29 @@ def __query_impl_roots(hdl: Any, state: CallbackState) -> None:
     hdl.iter_root_filesystems(callback=__query_impl_callback, state=state)
 
 
-def __should_exclude_internal_paths(data: dict[str, Any]) -> bool:
+def __should_exclude_internal_paths(data: dict[str, Any], exclude_internal_paths: bool) -> bool:
     for path in data["paths"]:
-        if has_internal_path(path):
+        if hidden_from_zfs_listing(path):
             # somone is explicilty querying an
             # internal path
             return False
     # 1. no paths specified are internal path
     # 2. no paths specified at all (empty query)
     # 3. or someone exclusively asks for internal paths
-    #   NOTE: (the `exclude_internal_paths` is a private
-    #   internal argument that is set internally within
-    #   middleware. It's not exposed to public.)
-    return data.get("exclude_internal_paths", True)  # type: ignore[no-any-return]
+    #   NOTE: `exclude_internal_paths` is not a field on the
+    #   request model, so no public caller can set it. It is
+    #   still an ordinary parameter of a @private method, and
+    #   rpc.py dispatches those, so it is not unreachable --
+    #   just absent from every public surface.
+    return exclude_internal_paths
 
 
-def query_impl(hdl: Any, data: dict[str, Any], tier_enabled: bool = False) -> list[dict[str, Any]]:
+def query_impl(
+    hdl: Any,
+    data: dict[str, Any],
+    tier_enabled: bool = False,
+    exclude_internal_paths: bool = True,
+) -> list[dict[str, Any]]:
     if data["max_depth"] > 0 and data["get_children"] is False:
         # If max_depth > 0, enable get_children implicitly
         data["get_children"] = True
@@ -119,7 +127,7 @@ def query_impl(hdl: Any, data: dict[str, Any], tier_enabled: bool = False) -> li
         results=list(),
         query_args=data,
         dp=DeterminedProperties(),
-        eip=__should_exclude_internal_paths(data),
+        eip=__should_exclude_internal_paths(data, exclude_internal_paths),
         current_depth=0,
         pool_special_cache={},
         tier_enabled=tier_enabled,

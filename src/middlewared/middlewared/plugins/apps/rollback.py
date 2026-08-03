@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from middlewared.api.current import AppEntry, AppRollbackOptions, QueryOptions, ZFSResourceSnapshotRollbackQuery
 from middlewared.service import ServiceContext, ValidationErrors
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .compose_utils import compose_action
 from .ix_apps.lifecycle import add_context_to_values, get_current_app_config, update_app_config
@@ -66,14 +67,17 @@ def rollback(context: ServiceContext, job: Job, app_name: str, options: AppRollb
             snap_name = f'{app_volume_ds}@{options.app_version}'
             if context.call_sync2(context.s.zfs.resource.snapshot.exists, snap_name):
                 job.set_progress(40, f'Rolling back {app_name!r} app to {options.app_version!r} version')
-                context.call_sync2(context.s.zfs.resource.snapshot.rollback_impl, ZFSResourceSnapshotRollbackQuery(
-                    path=snap_name,
-                    force=True,
-                    recursive=True,
-                    recursive_clones=True,
-                    recursive_rollback=True,
-                    bypass=True,
-                ))
+                context.call_sync2(
+                    context.s.zfs.resource.snapshot.rollback_impl,
+                    ZFSResourceSnapshotRollbackQuery(
+                        path=snap_name,
+                        force=True,
+                        recursive=True,
+                        recursive_clones=True,
+                        recursive_rollback=True,
+                    ),
+                    access=InternalAccess.ALLOW,
+                )
 
         compose_action(app_name, options.app_version, 'up', force_recreate=True, remove_orphans=True)
     finally:

@@ -9,6 +9,7 @@ from middlewared.api.current import ZFSResourceSnapshotRollbackQuery
 from middlewared.plugins.apps.ix_apps.path import get_installed_app_path
 from middlewared.plugins.apps.ix_apps.utils import AppState
 from middlewared.service import CallError, ServiceContext
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .backup import list_backups
 from .fs_manage import mount_docker_ds
@@ -38,20 +39,23 @@ def restore_backup(context: ServiceContext, job: Job, backup_name: str) -> None:
     assert docker_config.dataset is not None
     context.call_sync2(
         context.s.zfs.resource.destroy_impl, os.path.join(docker_config.dataset, 'docker'),
-        bypass=True, recursive=True,
+        recursive=True, access=InternalAccess.ALLOW,
     )
 
     job.set_progress(25, f'Rolling back to {backup_name!r} backup')
     docker_ds, snapshot_name = backup.snapshot_name.split('@')
     skipped_snapshot_on_backup = datasets_to_skip_for_snapshot_on_backup(docker_ds)
     for dataset in filter(lambda d: d not in skipped_snapshot_on_backup, docker_datasets(docker_ds)):
-        context.call_sync2(context.s.zfs.resource.snapshot.rollback_impl, ZFSResourceSnapshotRollbackQuery(
-            path=f'{dataset}@{snapshot_name}',
-            force=True,
-            recursive=True,
-            recursive_clones=True,
-            bypass=True,
-        ))
+        context.call_sync2(
+            context.s.zfs.resource.snapshot.rollback_impl,
+            ZFSResourceSnapshotRollbackQuery(
+                path=f'{dataset}@{snapshot_name}',
+                force=True,
+                recursive=True,
+                recursive_clones=True,
+            ),
+            access=InternalAccess.ALLOW,
+        )
 
     job.set_progress(30, 'Rolled back snapshots')
 

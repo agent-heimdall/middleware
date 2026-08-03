@@ -39,6 +39,11 @@ from middlewared.api.current import (
 from middlewared.service import Service, private
 from middlewared.service.decorators import pass_thread_local_storage
 from middlewared.service_exception import ValidationError
+from middlewared.utils.zfs.guard import (
+    InternalAccess,
+    deny_protected_path,
+    deny_protected_snapshot,
+)
 
 from .destroy_impl import destroy_impl
 from .exceptions import (
@@ -54,7 +59,7 @@ from .snapshot_create_impl import create_snapshots_impl
 from .snapshot_hold_release_impl import hold_impl, release_impl
 from .snapshot_query_impl import query_snapshots_impl
 from .snapshot_rollback_impl import rollback_impl
-from .utils import group_paths_by_parents, has_internal_path, open_resource
+from .utils import group_paths_by_parents, open_resource
 
 
 class ZFSResourceSnapshotService(Service):
@@ -211,21 +216,21 @@ class ZFSResourceSnapshotService(Service):
 
     @private
     @pass_thread_local_storage
-    def destroy_impl(self, tls: Any, data: ZFSResourceSnapshotDestroyQuery) -> tuple[str | None, int | None]:
+    def destroy_impl(
+        self,
+        tls: Any,
+        data: ZFSResourceSnapshotDestroyQuery,
+        access: InternalAccess = InternalAccess.DENY,
+    ) -> tuple[str | None, int | None]:
         schema = "zfs.resource.snapshot.destroy"
 
-        # Check for internal path protection
-        # For snapshot paths, extract the dataset portion
-        check_path = data.path.split("@")[0] if "@" in data.path else data.path
-        if not data.bypass and has_internal_path(check_path):
-            raise ValidationError(schema, f"{data.path!r} is a protected path.", errno.EACCES)
+        deny_protected_snapshot(schema, data.path, access)
 
         return destroy_impl(
             tls,
             data.path,
             data.recursive,
             data.all_snapshots,
-            data.bypass,
             data.defer,
         )
 
@@ -246,7 +251,7 @@ class ZFSResourceSnapshotService(Service):
         - the snapshot does not exist (``ENOENT``)
         - it has dependent clones and ``defer`` is ``false`` (``ENOTEMPTY``)
         - it has active holds (``ENOTEMPTY``)
-        - a protected path is targeted without ``bypass`` (``EACCES``)
+        - a protected path is targeted by a caller that does not own it (``EACCES``)
 
         Examples:
 
@@ -317,14 +322,15 @@ class ZFSResourceSnapshotService(Service):
 
     @private
     @pass_thread_local_storage
-    def rename_impl(self, tls: Any, data: ZFSResourceSnapshotRenameQuery) -> None:
+    def rename_impl(
+        self,
+        tls: Any,
+        data: ZFSResourceSnapshotRenameQuery,
+        access: InternalAccess = InternalAccess.DENY,
+    ) -> None:
         schema = "zfs.resource.snapshot.rename"
 
-        # Check for internal path protection
-        # For snapshot paths, extract the dataset portion
-        check_path = data.current_name.split("@")[0] if "@" in data.current_name else data.current_name
-        if not data.bypass and has_internal_path(check_path):
-            raise ValidationError(schema, f"{data.current_name!r} is a protected path.", errno.EACCES)
+        deny_protected_snapshot(schema, data.current_name, access)
 
         return rename_impl(
             tls,
@@ -402,7 +408,12 @@ class ZFSResourceSnapshotService(Service):
 
     @private
     @pass_thread_local_storage
-    def clone_impl(self, tls: Any, data: ZFSResourceSnapshotCloneQuery) -> None:
+    def clone_impl(
+        self,
+        tls: Any,
+        data: ZFSResourceSnapshotCloneQuery,
+        access: InternalAccess = InternalAccess.DENY,
+    ) -> None:
         schema = "zfs.resource.snapshot.clone"
 
         if "special_small_blocks" in data.properties:
@@ -413,14 +424,11 @@ class ZFSResourceSnapshotService(Service):
                     errno.EINVAL,
                 )
 
-        # Check for internal path protection on BOTH source and destination
-        if not data.bypass:
-            # For snapshot paths, extract the dataset portion
-            source_check = data.snapshot.split("@")[0] if "@" in data.snapshot else data.snapshot
-            if has_internal_path(source_check):
-                raise ValidationError(schema, f"{data.snapshot!r} is a protected path.", errno.EACCES)
-            if has_internal_path(data.dataset):
-                raise ValidationError(schema, f"{data.dataset!r} is a protected path.", errno.EACCES)
+        # Both ends are guarded: cloning a protected snapshot is as much a mutation as landing a
+        # clone on top of a protected dataset. The source is a snapshot name, the destination is a
+        # dataset name, so they take different guards.
+        deny_protected_snapshot(schema, data.snapshot, access)
+        deny_protected_path(schema, data.dataset, access)
 
         return clone_impl(
             tls,
@@ -497,12 +505,15 @@ class ZFSResourceSnapshotService(Service):
 
     @private
     @pass_thread_local_storage
-    def create_impl(self, tls: Any, data: ZFSResourceSnapshotCreateQuery) -> Any:
+    def create_impl(
+        self,
+        tls: Any,
+        data: ZFSResourceSnapshotCreateQuery,
+        access: InternalAccess = InternalAccess.DENY,
+    ) -> Any:
         schema = "zfs.resource.snapshot.create"
 
-        # Check for internal path protection
-        if not data.bypass and has_internal_path(data.dataset):
-            raise ValidationError(schema, f"{data.dataset!r} is a protected path.", errno.EACCES)
+        deny_protected_path(schema, data.dataset, access)
 
         return create_snapshots_impl(
             tls,
@@ -581,14 +592,15 @@ class ZFSResourceSnapshotService(Service):
 
     @private
     @pass_thread_local_storage
-    def hold_impl(self, tls: Any, data: ZFSResourceSnapshotHoldQuery) -> None:
+    def hold_impl(
+        self,
+        tls: Any,
+        data: ZFSResourceSnapshotHoldQuery,
+        access: InternalAccess = InternalAccess.DENY,
+    ) -> None:
         schema = "zfs.resource.snapshot.hold"
 
-        # Check for internal path protection
-        if not data.bypass:
-            check_path = data.path.split("@")[0] if "@" in data.path else data.path
-            if has_internal_path(check_path):
-                raise ValidationError(schema, f"{data.path!r} is a protected path.", errno.EACCES)
+        deny_protected_snapshot(schema, data.path, access)
 
         return hold_impl(
             tls,
@@ -696,14 +708,15 @@ class ZFSResourceSnapshotService(Service):
 
     @private
     @pass_thread_local_storage
-    def release_impl(self, tls: Any, data: ZFSResourceSnapshotReleaseQuery) -> None:
+    def release_impl(
+        self,
+        tls: Any,
+        data: ZFSResourceSnapshotReleaseQuery,
+        access: InternalAccess = InternalAccess.DENY,
+    ) -> None:
         schema = "zfs.resource.snapshot.release"
 
-        # Check for internal path protection
-        if not data.bypass:
-            check_path = data.path.split("@")[0] if "@" in data.path else data.path
-            if has_internal_path(check_path):
-                raise ValidationError(schema, f"{data.path!r} is a protected path.", errno.EACCES)
+        deny_protected_snapshot(schema, data.path, access)
 
         return release_impl(
             tls,
@@ -765,14 +778,15 @@ class ZFSResourceSnapshotService(Service):
 
     @private
     @pass_thread_local_storage
-    def rollback_impl(self, tls: Any, data: ZFSResourceSnapshotRollbackQuery) -> None:
+    def rollback_impl(
+        self,
+        tls: Any,
+        data: ZFSResourceSnapshotRollbackQuery,
+        access: InternalAccess = InternalAccess.DENY,
+    ) -> None:
         schema = "zfs.resource.snapshot.rollback"
 
-        # Check for internal path protection
-        if not data.bypass:
-            check_path = data.path.split("@")[0] if "@" in data.path else data.path
-            if has_internal_path(check_path):
-                raise ValidationError(schema, f"{data.path!r} is a protected path.", errno.EACCES)
+        deny_protected_snapshot(schema, data.path, access)
 
         return rollback_impl(
             tls,

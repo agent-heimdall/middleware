@@ -260,6 +260,7 @@ from middlewared.utils.boot.pool import BOOT_POOL_NAME_VALID
 from middlewared.utils.size import format_size
 from middlewared.utils.tdb import close_sysdataset_tdb_handles
 from middlewared.utils.zfs import query_imported_fast_impl
+from middlewared.utils.zfs.guard import InternalAccess
 
 # systemd writes coredumps here; we bind <SYSDATASET>/cores onto it so
 # coredumps land on persistent storage instead of the boot pool.
@@ -776,10 +777,10 @@ class SystemDatasetService(ConfigService):
                 )
             elif is_cores_ds and datasets_prop[dataset]['used']['value'] >= 1024 ** 3:
                 try:
-                    # bypass=True: <pool>/.system/cores is protected.
+                    # <pool>/.system/cores is protected; the system dataset plugin owns it.
                     await self.call2(
                         self.s.zfs.resource.destroy_impl, dataset,
-                        recursive=True, bypass=True,
+                        recursive=True, access=InternalAccess.ALLOW,
                     )
                     await self.middleware.call(
                         'pool.dataset.create_impl',
@@ -797,6 +798,7 @@ class SystemDatasetService(ConfigService):
                     await self.middleware.call(
                         'pool.dataset.update_impl',
                         UpdateImplArgs(name=dataset, zprops=update_props),
+                        InternalAccess.ALLOW,
                     )
 
         return list(datasets.values())
@@ -929,7 +931,7 @@ class SystemDatasetService(ConfigService):
         try:
             failed, errnum = self.call_sync2(
                 self.s.zfs.resource.destroy_impl, path,
-                recursive=True, bypass=True,
+                recursive=True, access=InternalAccess.ALLOW,
             )
         except ZFSPathNotFoundException:
             return
@@ -1095,6 +1097,7 @@ class SystemDatasetService(ConfigService):
             self.middleware.call_sync(
                 'pool.dataset.update_impl',
                 UpdateImplArgs(name=config['basename'], zprops={'acltype': 'off'}),
+                InternalAccess.ALLOW,
             )
 
         self._bind_cores_to_coredump()

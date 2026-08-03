@@ -10,6 +10,7 @@ from middlewared.api.current import ContainerEntry, ZFSResourceQuery
 from middlewared.plugins.pool_.utils import UpdateImplArgs
 from middlewared.service import CallError, ServiceContext
 import middlewared.sqlalchemy as sa
+from middlewared.utils.zfs.guard import InternalAccess
 
 from .crud import ContainerCreateWithDataset
 from .dataset import ensure_datasets
@@ -287,7 +288,8 @@ def migrate_specific_pool(context: ServiceContext, job: Job, pool: str, existing
                             name=ds,
                             zprops={'readonly': 'off'},
                             iprops={'mountpoint'}
-                        )
+                        ),
+                        InternalAccess.ALLOW,
                     )
 
             # Armed before the properties are touched: a partial apply has to be
@@ -299,7 +301,8 @@ def migrate_specific_pool(context: ServiceContext, job: Job, pool: str, existing
                     name=dataset['name'],
                     zprops={'canmount': 'on'},
                     iprops={'mountpoint'},
-                )
+                ),
+                InternalAccess.ALLOW,
             )
             context.call_sync2(context.s.zfs.resource.mount, dataset['name'])
 
@@ -410,6 +413,7 @@ def revert_incus_mount_properties(context: ServiceContext, job: Job, container_d
                 name=container_ds,
                 zprops={'canmount': 'noauto', 'mountpoint': 'legacy'},
             ),
+            InternalAccess.ALLOW,
         )
     except Exception:
         context.logger.warning(
@@ -434,6 +438,7 @@ def restore_legacy_parent_mountpoints(context: ServiceContext, pool: str) -> Non
             context.middleware.call_sync(
                 'pool.dataset.update_impl',
                 UpdateImplArgs(name=ds, zprops={'mountpoint': 'legacy'}),
+                InternalAccess.ALLOW,
             )
         except Exception:
             context.logger.warning('%s: failed to restore mountpoint after migration', ds, exc_info=True)
@@ -533,6 +538,7 @@ def relocate_container_origin(context: ServiceContext, container_ds: str) -> str
         context.middleware.call_sync(
             'pool.dataset.update_impl',
             UpdateImplArgs(name=origin_dataset, zprops={'canmount': 'noauto'}),
+            InternalAccess.ALLOW,
         )
         context.call_sync2(context.s.zfs.resource.rename, origin_dataset, final_target)
     except Exception:

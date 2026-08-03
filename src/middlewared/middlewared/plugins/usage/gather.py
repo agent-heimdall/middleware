@@ -65,8 +65,8 @@ def get_gather_context(service: Service) -> GatherContext:
     for i in service.middleware.call_sync("datastore.query", "services.services", [], {"prefix": "srv_"}):
         context["services"].append({"name": i["service"], "enabled": i["enable"]})
 
-    qry_ops = ZFSResourceQuery(get_children=True, exclude_internal_paths=False)
-    for ds in service.call_sync2(service.s.zfs.resource.query_impl, qry_ops):
+    qry_ops = ZFSResourceQuery(get_children=True)
+    for ds in service.call_sync2(service.s.zfs.resource.query_impl, qry_ops, exclude_internal_paths=False):
         if ds["name"] == ds["pool"]:
             context["root_datasets"][ds["pool"]] = ds
             context["total_datasets"] += 1

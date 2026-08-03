@@ -16,8 +16,9 @@ from middlewared.utils.tdb import (
     TDBPathType,
     get_tdb_handle,
 )
+from middlewared.utils.zfs.managed_datasets import hidden_from_zfs_listing
 
-from .utils import has_internal_path, open_resource
+from .utils import open_resource
 
 __all__ = ("count_snapshots_impl",)
 
@@ -149,7 +150,7 @@ def __dataset_count_callback(ds_hdl: Any, state: SnapshotCountState) -> bool:
     ds_name = ds_hdl.name
 
     # Check if internal path should be excluded
-    if state.eip and has_internal_path(ds_name):
+    if state.eip and hidden_from_zfs_listing(ds_name):
         return True
 
     # Count snapshots for this dataset (with caching)
@@ -166,7 +167,7 @@ def __dataset_count_callback(ds_hdl: Any, state: SnapshotCountState) -> bool:
 def __should_exclude_internal_paths(data: ZFSResourceSnapshotCountQuery) -> bool:
     """Determine if internal paths should be excluded from counts."""
     for path in data.paths:
-        if has_internal_path(path):
+        if hidden_from_zfs_listing(path):
             return False
     return True
 
