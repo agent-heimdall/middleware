@@ -1357,7 +1357,7 @@ class Middleware(LoadPluginsMixin, ServiceCallMixin):
 
             last = current
 
-    async def dump_api(self, stream: typing.TextIO):
+    async def dump_api(self, stream: typing.TextIO, keep_refs: bool = False):
         self.__plugins_load()
 
         apis = self._load_apis()
@@ -1370,7 +1370,9 @@ class Middleware(LoadPluginsMixin, ServiceCallMixin):
                 version_title += " (current)"
 
             result["versions"].append(
-                (await APIDumper(version, version_title, api, self.role_manager).dump()).model_dump()
+                (await APIDumper(
+                    version, version_title, api, self.role_manager, keep_refs=keep_refs,
+                ).dump()).model_dump()
             )
 
         json.dump(result, stream)
@@ -1514,6 +1516,8 @@ class Middleware(LoadPluginsMixin, ServiceCallMixin):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dump-api', action='store_true')
+    parser.add_argument('--keep-refs', action='store_true',
+                        help='With --dump-api, emit pydantic native schemas retaining $defs and $ref')
     parser.add_argument('--pidfile', '-P', action='store_true')
     parser.add_argument('--disable-loop-monitor', '-L', action='store_true')
     parser.add_argument('--loop-debug', action='store_true')
@@ -1545,7 +1549,7 @@ def main():
     )
 
     if args.dump_api:
-        asyncio.get_event_loop().run_until_complete(middleware.dump_api(sys.stdout))
+        asyncio.get_event_loop().run_until_complete(middleware.dump_api(sys.stdout, args.keep_refs))
         return
 
     setproctitle.setproctitle('middlewared')

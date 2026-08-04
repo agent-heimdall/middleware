@@ -23,6 +23,7 @@ class APIDumpMethod(BaseModel):
     doc: str | None
     schemas: dict
     removed_in: str | None
+    job: bool = False
     input_pipes: bool = False
     output_pipes: bool = False
     check_pipes: bool = True
@@ -37,11 +38,23 @@ class APIDumpEvent(BaseModel):
 
 
 class APIDumper:
-    def __init__(self, version: str, version_title: str, api: API, role_manager: RoleManager):
+    """Dumps an API version's methods and events as JSON schemas.
+
+    By default, schemas are post-processed for the documentation builder: every `$ref` is
+    replaced with an inline copy of its definition and the `$defs` tables are dropped. With
+    `keep_refs=True`, each method/event schema is instead emitted as pydantic's native
+    output — a standalone JSON Schema document that retains the `$defs` table, named model
+    definitions, and resolvable discriminator mappings — for consumers that need model
+    identities (e.g. client code generators).
+    """
+
+    def __init__(self, version: str, version_title: str, api: API, role_manager: RoleManager, *,
+                 keep_refs: bool = False):
         self.version = version
         self.version_title = version_title
         self.api = api
         self.role_manager = role_manager
+        self.keep_refs = keep_refs
 
     async def dump(self):
         return APIDump(
@@ -87,7 +100,8 @@ class APIDumper:
             doc = re.sub(r"(\S)\n[ ]*(\S)", "\\1 \\2", doc).strip()
 
         input_pipes, output_pipes, check_pipes = False, False, True
-        if job := getattr(methodobj_, "_job", None):
+        job = getattr(methodobj_, "_job", None)
+        if job:
             pipes = job["pipes"]
             input_pipes = "input" in pipes
             output_pipes = "output" in pipes
@@ -109,7 +123,8 @@ class APIDumper:
             removed_in=getattr(method.methodobj, "_removed_in", None),
             input_pipes=input_pipes,
             output_pipes=output_pipes,
-            check_pipes=check_pipes
+            check_pipes=check_pipes,
+            job=job is not None,
         )
 
     async def _dump_method_schemas(self, method: Method):
@@ -119,9 +134,15 @@ class APIDumper:
             return None
 
         accepts_json_schema = accepts_model.model_json_schema()
-        accepts_json_schema = replace_refs(accepts_json_schema)
-
         returns_json_schema = returns_model.model_json_schema(mode="serialization")
+
+        if self.keep_refs:
+            return {
+                "accepts": accepts_json_schema,
+                "returns": returns_json_schema,
+            }
+
+        accepts_json_schema = replace_refs(accepts_json_schema)
         returns_json_schema = replace_refs(returns_json_schema)
 
         return {
@@ -167,6 +188,9 @@ class APIDumper:
         )
 
     def _dump_event_schemas(self, event: Event):
+        if self.keep_refs:
+            return {name: model.model_json_schema() for name, model in event.event["models"].items()}
+
         properties = {}
         for name, model in event.event["models"].items():
             schema = model.model_json_schema()
